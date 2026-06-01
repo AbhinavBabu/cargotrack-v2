@@ -1,0 +1,57 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: cargotrack-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-cargotrack}
+      POSTGRES_USER: ${POSTGRES_USER:-cargotrack}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cargotrack123}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cargotrack}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: cargotrack-api
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-cargotrack}:${POSTGRES_PASSWORD:-cargotrack123}@postgres:5432/${POSTGRES_DB:-cargotrack}?schema=public
+      JWT_SECRET: ${JWT_SECRET:-cargotrack-super-secret-key-change-me}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-7d}
+      PORT: 4000
+      UPLOAD_DIR: /uploads
+      CORS_ORIGIN: ${CORS_ORIGIN:-*}
+      NODE_ENV: ${NODE_ENV:-production}
+    ports:
+      - "${API_PORT:-4000}:4000"
+    volumes:
+      - uploads:/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: /api
+    container_name: cargotrack-web
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-80}:80"
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:
+  uploads:

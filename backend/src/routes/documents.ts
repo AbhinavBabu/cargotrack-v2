@@ -1,0 +1,175 @@
+import { Router, Request, Response } from 'express';
+import { PrismaClient } from '@prisma/client';
+import multer from 'multer';
+import { v4 as uuidv4 } from 'uuid';
+import path from 'path';
+import { authenticate } from '../middleware/auth';
+import { storageProvider } from '../providers/storage';
+
+const prisma = new PrismaClient();
+const router = Router();
+
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+
+const ALLOWED_DOC_TYPES = ['INVOICE', 'SHIPPING_LABEL', 'PROOF_OF_DELIVERY', 'CUSTOMS'];
+
+/**
+ * @swagger
+ * /api/documents/shipment/{shipmentId}:
+ *   post:
+ *     summary: Upload a document for a shipment
+ *     tags: [Documents]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: shipmentId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               document:
+ *                 type: string
+ *                 format: binary
+ *               documentType:
+ *                 type: string
+ *                 enum: [INVOICE, SHIPPING_LABEL, PROOF_OF_DELIVERY, CUSTOMS]
+ *     responses:
+ *       201:
+ *         description: Document uploaded
+ */
+router.post('/shipment/:shipmentId', authenticate, upload.single('document'), async (req: Request, res: Response) => {
+  try {
+    if (!req.file) {
+      res.status(400).json({ error: 'No file uploaded' });
+      return;
+    }
+
+    const { documentType } = req.body;
+    if (!documentType || !ALLOWED_DOC_TYPES.includes(documentType)) {
+      res.status(400).json({ error: 'Invalid document type. Must be one of: ' + ALLOWED_DOC_TYPES.join(', ') });
+      return;
+    }
+
+    // Verify shipment belongs to user
+    const shipment = await prisma.shipment.findFirst({
+      where: { id: req.params.shipmentId, userId: req.user!.userId },
+    });
+
+    if (!shipment) {
+      res.status(404).json({ error: 'Shipment not found' });
+      return;
+    }
+
+    const ext = path.extname(req.file.originalname);
+    const fileName = `documents/${shipment.trackingNumber}/${uuidv4()}${ext}`;
+    await storageProvider.upload(req.file.buffer, fileName);
+
+    const doc = await prisma.shipmentDocument.create({
+      data: {
+        fileName,
+        originalName: req.file.originalname,
+        fileType: req.file.mimetype,
+        fileSize: req.file.size,
+        documentType,
+        shipmentId: req.params.shipmentId,
+      },
+    });
+
+    res.status(201).json(doc);
+  } catch (error) {
+    console.error('Upload document error:', error);
+    res.status(500).json({ error: 'Failed to upload document' });
+  }
+});
+
+/**
+ * @swagger
+ * /api/documents/shipment/{shipmentId}:
+ *   get:
+ *     summary: List documents for a shipment
+ *     tags: [Documents]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: shipmentId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: List of documents
+ */
+router.get('/shipment/:shipmentId', authenticate, async (req: Request, res: Response) => {
+  try {
+    const shipment = await prisma.shipment.findFirst({
+      where: { id: req.params.shipmentId, userId: req.user!.userId },
+    });
+
+    if (!shipment) {
+      res.status(404).json({ error: 'Shipment not found' });
+      return;
+    }
+
+    const documents = await prisma.shipmentDocument.findMany({
+      where: { shipmentId: req.params.shipmentId },
+      orderBy: { uploadedAt: 'desc' },
+    });
+
+    res.json(documents);
+  } catch (error) {
+    console.error('List documents error:', error);
+    res.status(500).json({ error: 'Failed to list documents' });
+  }
+});
+
+/**
+ * @swagger
+ * /api/documents/{id}/download:
+ *   get:
+ *     summary: Download a document
+ *     tags: [Documents]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: File download
+ */
+router.get('/:id/download', authenticate, async (req: Request, res: Response) => {
+  try {
+    const doc = await prisma.shipmentDocument.findUnique({
+      where: { id: req.params.id },
+      include: { shipment: true },
+    });
+
+    if (!doc) {
+      res.status(404).json({ error: 'Document not found' });
+      return;
+    }
+
+    // Allow access if user owns the shipment or is admin
+    if (doc.shipment.userId !== req.user!.userId && req.user!.role !== 'ADMIN') {
+      res.status(403).json({ error: 'Access denied' });
+      return;
+    }
+
+    const fileBuffer = await storageProvider.download(doc.fileName);
+    res.setHeader('Content-Type', doc.fileType);
+    res.setHeader('Content-Disposition', `attachment; filename="${doc.originalName}"`);
+    res.send(fileBuffer);
+  } catch (error) {
+    console.error('Download document error:', error);
+    res.status(500).json({ error: 'Failed to download document' });
+  }
+});
+
+export default router;

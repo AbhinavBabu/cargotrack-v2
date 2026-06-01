@@ -1,0 +1,90 @@
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  USER
+  ADMIN
+}
+
+enum ShipmentStatus {
+  CREATED
+  PICKED_UP
+  IN_TRANSIT
+  OUT_FOR_DELIVERY
+  DELIVERED
+  DELAYED
+  CANCELLED
+}
+
+model User {
+  id             String         @id @default(uuid())
+  email          String         @unique
+  password       String
+  name           String
+  role           Role           @default(USER)
+  profilePicture String?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+  shipments      Shipment[]
+  notifications  Notification[]
+}
+
+model Shipment {
+  id                    String             @id @default(uuid())
+  trackingNumber        String             @unique
+  title                 String
+  senderName            String
+  receiverName          String
+  origin                String
+  destination           String
+  shipmentType          String
+  weight                Float
+  description           String?
+  estimatedDeliveryDate DateTime?
+  status                ShipmentStatus     @default(CREATED)
+  createdAt             DateTime           @default(now())
+  updatedAt             DateTime           @updatedAt
+  userId                String
+  user                  User               @relation(fields: [userId], references: [id])
+  trackingEvents        TrackingEvent[]
+  documents             ShipmentDocument[]
+}
+
+model TrackingEvent {
+  id          String         @id @default(uuid())
+  status      ShipmentStatus
+  location    String?
+  description String
+  timestamp   DateTime       @default(now())
+  shipmentId  String
+  shipment    Shipment       @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+}
+
+model ShipmentDocument {
+  id           String   @id @default(uuid())
+  fileName     String
+  originalName String
+  fileType     String
+  fileSize     Int
+  documentType String
+  uploadedAt   DateTime @default(now())
+  shipmentId   String
+  shipment     Shipment @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+}
+
+model Notification {
+  id        String   @id @default(uuid())
+  title     String
+  message   String
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
