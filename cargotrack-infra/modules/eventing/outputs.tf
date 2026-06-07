@@ -1,0 +1,39 @@
+output "sqs_queue_url" {
+  description = "URL of the main SQS document processor queue"
+  value       = aws_sqs_queue.main.id
+}
+
+output "sqs_queue_arn" {
+  description = "ARN of the main SQS document processor queue"
+  value       = aws_sqs_queue.main.arn
+}
+
+output "dlq_url" {
+  description = "URL of the dead-letter queue"
+  value       = aws_sqs_queue.dlq.id
+}
+
+output "dlq_arn" {
+  description = "ARN of the dead-letter queue"
+  value       = aws_sqs_queue.dlq.arn
+}
+
+output "lambda_function_arn" {
+  description = "ARN of the document processor Lambda function"
+  value       = aws_lambda_function.document_processor.arn
+}
+
+output "lambda_function_name" {
+  description = "Name of the document processor Lambda function"
+  value       = aws_lambda_function.document_processor.function_name
+}
+
+output "event_bus_name" {
+  description = "Name of the CargoTrack custom EventBridge event bus"
+  value       = aws_cloudwatch_event_bus.main.name
+}
+
+output "event_bus_arn" {
+  description = "ARN of the CargoTrack custom EventBridge event bus"
+  value       = aws_cloudwatch_event_bus.main.arn
+}

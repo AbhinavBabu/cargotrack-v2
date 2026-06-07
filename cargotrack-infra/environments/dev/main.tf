@@ -39,10 +39,9 @@ module "compute" {
   documents_bucket_arn = module.storage.bucket_arn
   documents_bucket_id  = module.storage.bucket_id
 
-  aws_region = var.aws_region
+  aws_region     = var.aws_region
+  event_bus_name = module.eventing.event_bus_name
 }
-
-
 
 module "database" {
 
@@ -60,6 +59,31 @@ module "storage" {
   source = "../../modules/storage"
 
   project_name = var.project_name
+
+  kms_key_arn = module.database.kms_key_arn
+}
+
+module "monitoring" {
+
+  source = "../../modules/monitoring"
+
+  project_name = var.project_name
+  aws_region   = var.aws_region
+
+  backend_asg_name        = module.compute.backend_asg_name
+  external_alb_arn_suffix = module.compute.external_alb_arn_suffix
+  db_identifier           = module.database.db_identifier
+
+  alarm_email = var.alarm_email
+  kms_key_arn = module.database.kms_key_arn
+}
+
+module "eventing" {
+
+  source = "../../modules/eventing"
+
+  project_name = var.project_name
+  aws_region   = var.aws_region
 
   kms_key_arn = module.database.kms_key_arn
 }

@@ -1,3 +1,5 @@
+data "aws_caller_identity" "current" {}
+
 data "aws_ami" "ubuntu" {
 
   most_recent = true
@@ -46,14 +48,14 @@ ENVFILE
 
 chmod 600 /etc/frontend.env
 
-docker pull abhinavbabu33/cargotrack-frontend:latest
+docker pull abhinavbabu33/cargotrack-frontend:v1
 
 docker run -d \
   --name frontend \
   --restart unless-stopped \
   --env-file /etc/frontend.env \
   -p 80:80 \
-  abhinavbabu33/cargotrack-frontend:latest
+  abhinavbabu33/cargotrack-frontend:v1
 EOF
 
   backend_user_data = <<-EOF
@@ -131,18 +133,19 @@ UPLOAD_DIR=/uploads
 CORS_ORIGIN=*
 AWS_DEFAULT_REGION=${var.aws_region}
 S3_BUCKET=${var.documents_bucket_id}
+EVENT_BUS_NAME=${var.event_bus_name}
 ENVFILE
 
 chmod 600 /etc/cargotrack.env
 
-docker pull abhinavbabu33/cargotrack-backend:latest
+docker pull abhinavbabu33/cargotrack-backend:v1
 
 docker run -d \
   --name backend \
   --restart unless-stopped \
   --env-file /etc/cargotrack.env \
   -p 4000:4000 \
-  abhinavbabu33/cargotrack-backend:latest
+  abhinavbabu33/cargotrack-backend:v1
 EOF
 }
 
@@ -393,6 +396,19 @@ data "aws_iam_policy_document" "ec2_secrets" {
       var.documents_bucket_arn
     ]
   }
+
+  statement {
+
+    sid = "EventBridgePublish"
+
+    actions = [
+      "events:PutEvents"
+    ]
+
+    resources = [
+      "arn:aws:events:${var.aws_region}:${data.aws_caller_identity.current.account_id}:event-bus/${var.event_bus_name}"
+    ]
+  }
 }
 
 
@@ -411,7 +427,7 @@ resource "aws_autoscaling_group" "frontend" {
   name = "${var.project_name}-frontend-asg"
 
   min_size         = 1
-  max_size         = 3
+  max_size         = 2
   desired_capacity = 1
 
   vpc_zone_identifier = var.web_subnet_ids
@@ -446,7 +462,7 @@ resource "aws_autoscaling_group" "backend" {
   name = "${var.project_name}-backend-asg"
 
   min_size         = 1
-  max_size         = 3
+  max_size         = 2
   desired_capacity = 1
 
   vpc_zone_identifier = var.app_subnet_ids

@@ -22,7 +22,8 @@ export const config = {
   uploadDir: process.env.UPLOAD_DIR || '/uploads',
   corsOrigin: process.env.CORS_ORIGIN || '*',
   nodeEnv: process.env.NODE_ENV || 'development',
-  // Admin auto-seeding: credentials read from env vars, created on startup if not found
   adminEmail: process.env.ADMIN_EMAIL || 'admin@cargotrack.com',
   adminPassword: process.env.ADMIN_PASSWORD || 'admin123',
+  eventBusName: process.env.EVENT_BUS_NAME,
 };
+

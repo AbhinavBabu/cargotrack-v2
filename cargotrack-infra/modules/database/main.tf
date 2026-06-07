@@ -28,8 +28,9 @@ resource "random_password" "admin_password" {
 
 resource "aws_secretsmanager_secret" "database" {
 
-  name       = "${var.project_name}-database-secret"
-  kms_key_id = aws_kms_key.main.arn
+  name                    = "${var.project_name}-database-secret"
+  kms_key_id              = aws_kms_key.main.arn
+  recovery_window_in_days = 0
 
   tags = local.common_tags
 }
@@ -47,8 +48,9 @@ resource "aws_secretsmanager_secret_version" "database" {
 
 resource "aws_secretsmanager_secret" "application" {
 
-  name       = "${var.project_name}-application-secret"
-  kms_key_id = aws_kms_key.main.arn
+  name                    = "${var.project_name}-application-secret"
+  kms_key_id              = aws_kms_key.main.arn
+  recovery_window_in_days = 0
 
   tags = local.common_tags
 }

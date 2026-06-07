@@ -5,6 +5,7 @@ import { v4 as uuidv4 } from 'uuid';
 import path from 'path';
 import { authenticate } from '../middleware/auth';
 import { storageProvider } from '../providers/storage';
+import { publishDocumentUploaded } from '../services/eventbridge';
 
 const prisma = new PrismaClient();
 const router = Router();
@@ -81,6 +82,15 @@ router.post('/shipment/:shipmentId', authenticate, upload.single('document'), as
     });
 
     res.status(201).json(doc);
+
+    await publishDocumentUploaded({
+      shipmentId: req.params.shipmentId,
+      documentId: doc.id,
+      fileName: doc.fileName,
+      documentType: doc.documentType,
+      uploadedBy: req.user!.userId,
+      uploadTimestamp: doc.uploadedAt.toISOString(),
+    });
   } catch (error) {
     console.error('Upload document error:', error);
     res.status(500).json({ error: 'Failed to upload document' });

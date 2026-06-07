@@ -72,3 +72,8 @@ variable "aws_region" {
   description = "AWS region"
   type        = string
 }
+
+variable "event_bus_name" {
+  description = "Name of the CargoTrack custom EventBridge event bus"
+  type        = string
+}
