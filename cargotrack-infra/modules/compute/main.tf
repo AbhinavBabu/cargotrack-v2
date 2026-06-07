@@ -1,0 +1,505 @@
+data "aws_ami" "ubuntu" {
+
+  most_recent = true
+
+  owners = [
+    "099720109477"
+  ]
+
+  filter {
+    name = "name"
+
+    values = [
+      "ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*"
+    ]
+  }
+
+  filter {
+    name = "virtualization-type"
+
+    values = [
+      "hvm"
+    ]
+  }
+}
+
+locals {
+  common_tags = {
+    Project   = var.project_name
+    ManagedBy = "Terraform"
+  }
+
+  frontend_user_data = <<-EOF
+#!/bin/bash
+
+apt-get update -y
+
+apt-get install -y docker.io
+
+systemctl enable --now docker
+
+usermod -aG docker ubuntu
+
+cat > /etc/frontend.env <<ENVFILE
+BACKEND_URL=http://${aws_lb.internal.dns_name}
+ENVFILE
+
+chmod 600 /etc/frontend.env
+
+docker pull abhinavbabu33/cargotrack-frontend:latest
+
+docker run -d \
+  --name frontend \
+  --restart unless-stopped \
+  --env-file /etc/frontend.env \
+  -p 80:80 \
+  abhinavbabu33/cargotrack-frontend:latest
+EOF
+
+  backend_user_data = <<-EOF
+#!/bin/bash
+
+apt-get update -y
+
+apt-get install -y docker.io jq unzip curl
+
+systemctl enable --now docker
+
+usermod -aG docker ubuntu
+
+curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+unzip -q /tmp/awscliv2.zip -d /tmp
+/tmp/aws/install
+rm -rf /tmp/awscliv2.zip /tmp/aws
+
+export AWS_DEFAULT_REGION="${var.aws_region}"
+
+DB_HOST=$(aws ssm get-parameter \
+  --name "/${var.project_name}/database/host" \
+  --query "Parameter.Value" \
+  --output text)
+
+DB_PORT=$(aws ssm get-parameter \
+  --name "/${var.project_name}/database/port" \
+  --query "Parameter.Value" \
+  --output text)
+
+DB_NAME=$(aws ssm get-parameter \
+  --name "/${var.project_name}/database/name" \
+  --query "Parameter.Value" \
+  --output text)
+
+DB_USER=$(aws ssm get-parameter \
+  --name "/${var.project_name}/database/user" \
+  --query "Parameter.Value" \
+  --output text)
+
+NODE_ENV=$(aws ssm get-parameter \
+  --name "/${var.project_name}/application/node-env" \
+  --query "Parameter.Value" \
+  --output text)
+
+DB_SECRET=$(aws secretsmanager get-secret-value \
+  --secret-id "${var.db_secret_arn}" \
+  --query "SecretString" \
+  --output text)
+
+DB_PASSWORD=$(echo "$DB_SECRET" | jq -r '.password')
+
+APP_SECRET=$(aws secretsmanager get-secret-value \
+  --secret-id "${var.app_secret_arn}" \
+  --query "SecretString" \
+  --output text)
+
+JWT_SECRET=$(echo "$APP_SECRET" | jq -r '.jwt_secret')
+ADMIN_EMAIL=$(echo "$APP_SECRET" | jq -r '.admin_email')
+ADMIN_PASSWORD=$(echo "$APP_SECRET" | jq -r '.admin_password')
+
+cat > /etc/cargotrack.env <<ENVFILE
+PORT=4000
+NODE_ENV=$NODE_ENV
+DATABASE_HOST=$DB_HOST
+DATABASE_PORT=$DB_PORT
+DATABASE_NAME=$DB_NAME
+DATABASE_USER=$DB_USER
+DATABASE_PASSWORD=$DB_PASSWORD
+JWT_SECRET=$JWT_SECRET
+JWT_EXPIRES_IN=7d
+ADMIN_EMAIL=$ADMIN_EMAIL
+ADMIN_PASSWORD=$ADMIN_PASSWORD
+UPLOAD_DIR=/uploads
+CORS_ORIGIN=*
+AWS_DEFAULT_REGION=${var.aws_region}
+S3_BUCKET=${var.documents_bucket_id}
+ENVFILE
+
+chmod 600 /etc/cargotrack.env
+
+docker pull abhinavbabu33/cargotrack-backend:latest
+
+docker run -d \
+  --name backend \
+  --restart unless-stopped \
+  --env-file /etc/cargotrack.env \
+  -p 4000:4000 \
+  abhinavbabu33/cargotrack-backend:latest
+EOF
+}
+
+resource "aws_lb" "external" {
+
+  name               = "${var.project_name}-external-alb"
+  internal           = false
+  load_balancer_type = "application"
+
+  security_groups = [
+    var.external_alb_sg_id
+  ]
+
+  subnets = var.public_subnet_ids
+
+  tags = merge(
+    local.common_tags,
+    {
+      Name = "${var.project_name}-external-alb"
+    }
+  )
+}
+
+resource "aws_lb" "internal" {
+
+  name               = "${var.project_name}-internal-alb"
+  internal           = true
+  load_balancer_type = "application"
+
+  security_groups = [
+    var.internal_alb_sg_id
+  ]
+
+  subnets = var.web_subnet_ids
+
+  tags = merge(
+    local.common_tags,
+    {
+      Name = "${var.project_name}-internal-alb"
+    }
+  )
+}
+
+resource "aws_lb_target_group" "frontend" {
+
+  name     = "${var.project_name}-frontend-tg"
+  port     = 80
+  protocol = "HTTP"
+
+  vpc_id = var.vpc_id
+
+  health_check {
+    path = "/"
+  }
+
+  tags = local.common_tags
+}
+
+resource "aws_lb_target_group" "backend" {
+
+  name     = "${var.project_name}-backend-tg"
+  port     = 4000
+  protocol = "HTTP"
+
+  vpc_id = var.vpc_id
+
+  health_check {
+    path = "/api/health"
+  }
+
+  tags = local.common_tags
+}
+
+data "aws_iam_policy_document" "ec2_assume_role" {
+
+  statement {
+
+    actions = [
+      "sts:AssumeRole"
+    ]
+
+    principals {
+
+      type = "Service"
+
+      identifiers = [
+        "ec2.amazonaws.com"
+      ]
+    }
+  }
+}
+
+resource "aws_iam_role" "ec2_role" {
+
+  name = "${var.project_name}-ec2-role"
+
+  assume_role_policy = data.aws_iam_policy_document.ec2_assume_role.json
+
+  tags = local.common_tags
+}
+
+
+resource "aws_iam_role_policy_attachment" "ssm" {
+
+  role = aws_iam_role.ec2_role.name
+
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+resource "aws_iam_role_policy_attachment" "cloudwatch" {
+
+  role = aws_iam_role.ec2_role.name
+
+  policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+}
+
+resource "aws_iam_instance_profile" "ec2_profile" {
+
+  name = "${var.project_name}-instance-profile"
+
+  role = aws_iam_role.ec2_role.name
+}
+
+resource "aws_launch_template" "frontend" {
+
+  name_prefix = "${var.project_name}-frontend-"
+
+  image_id = data.aws_ami.ubuntu.id
+
+  instance_type = "t3.micro"
+
+  vpc_security_group_ids = [
+    var.frontend_sg_id
+  ]
+
+  iam_instance_profile {
+    name = aws_iam_instance_profile.ec2_profile.name
+  }
+
+  user_data = base64encode(
+    local.frontend_user_data
+  )
+
+  tag_specifications {
+
+    resource_type = "instance"
+
+    tags = merge(
+      local.common_tags,
+      {
+        Name = "${var.project_name}-frontend"
+      }
+    )
+  }
+}
+
+resource "aws_launch_template" "backend" {
+
+  name_prefix = "${var.project_name}-backend-"
+
+  image_id = data.aws_ami.ubuntu.id
+
+  instance_type = "t3.micro"
+
+  vpc_security_group_ids = [
+    var.backend_sg_id
+  ]
+
+  iam_instance_profile {
+    name = aws_iam_instance_profile.ec2_profile.name
+  }
+
+  user_data = base64encode(
+    local.backend_user_data
+  )
+
+  tag_specifications {
+
+    resource_type = "instance"
+
+    tags = merge(
+      local.common_tags,
+      {
+        Name = "${var.project_name}-backend"
+      }
+    )
+  }
+}
+
+data "aws_iam_policy_document" "ec2_secrets" {
+
+  statement {
+
+    actions = [
+      "secretsmanager:GetSecretValue"
+    ]
+
+    resources = [
+      var.db_secret_arn,
+      var.app_secret_arn
+    ]
+  }
+
+  statement {
+
+    actions = [
+      "ssm:GetParameter",
+      "ssm:GetParameters"
+    ]
+
+    resources = [
+      "arn:aws:ssm:*:*:parameter/${var.project_name}/*"
+    ]
+  }
+
+  statement {
+
+    actions = [
+      "kms:Decrypt",
+      "kms:GenerateDataKey"
+    ]
+
+    resources = [
+      var.kms_key_arn
+    ]
+  }
+
+  statement {
+
+    actions = [
+      "s3:PutObject",
+      "s3:GetObject",
+      "s3:DeleteObject"
+    ]
+
+    resources = [
+      "${var.documents_bucket_arn}/*"
+    ]
+  }
+
+  statement {
+
+    actions = [
+      "s3:ListBucket"
+    ]
+
+    resources = [
+      var.documents_bucket_arn
+    ]
+  }
+}
+
+
+
+resource "aws_iam_role_policy" "ec2_secrets" {
+
+  name = "${var.project_name}-ec2-secrets-policy"
+
+  role = aws_iam_role.ec2_role.id
+
+  policy = data.aws_iam_policy_document.ec2_secrets.json
+}
+
+resource "aws_autoscaling_group" "frontend" {
+
+  name = "${var.project_name}-frontend-asg"
+
+  min_size         = 1
+  max_size         = 3
+  desired_capacity = 1
+
+  vpc_zone_identifier = var.web_subnet_ids
+
+  target_group_arns = [
+    aws_lb_target_group.frontend.arn
+  ]
+
+  health_check_type         = "ELB"
+  health_check_grace_period = 120
+
+  launch_template {
+    id      = aws_launch_template.frontend.id
+    version = "$Latest"
+  }
+
+  tag {
+    key                 = "Project"
+    value               = var.project_name
+    propagate_at_launch = true
+  }
+
+  tag {
+    key                 = "ManagedBy"
+    value               = "Terraform"
+    propagate_at_launch = true
+  }
+}
+
+resource "aws_autoscaling_group" "backend" {
+
+  name = "${var.project_name}-backend-asg"
+
+  min_size         = 1
+  max_size         = 3
+  desired_capacity = 1
+
+  vpc_zone_identifier = var.app_subnet_ids
+
+  target_group_arns = [
+    aws_lb_target_group.backend.arn
+  ]
+
+  health_check_type         = "ELB"
+  health_check_grace_period = 120
+
+  launch_template {
+    id      = aws_launch_template.backend.id
+    version = "$Latest"
+  }
+
+  tag {
+    key                 = "Project"
+    value               = var.project_name
+    propagate_at_launch = true
+  }
+
+  tag {
+    key                 = "ManagedBy"
+    value               = "Terraform"
+    propagate_at_launch = true
+  }
+}
+
+resource "aws_lb_listener" "external_http" {
+
+  load_balancer_arn = aws_lb.external.arn
+
+  port     = 80
+  protocol = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.frontend.arn
+  }
+}
+
+resource "aws_lb_listener" "internal_http" {
+
+  load_balancer_arn = aws_lb.internal.arn
+
+  port     = 80
+  protocol = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.backend.arn
+  }
+}
+
+
