@@ -67,6 +67,40 @@ data "aws_iam_policy_document" "kms_key_policy" {
 
     resources = ["*"]
   }
+
+  statement {
+
+    sid = "AllowEventBridge"
+
+    principals {
+      type        = "Service"
+      identifiers = ["events.amazonaws.com"]
+    }
+
+    actions = [
+      "kms:GenerateDataKey",
+      "kms:Decrypt"
+    ]
+
+    resources = ["*"]
+  }
+
+  statement {
+
+    sid = "AllowSQS"
+
+    principals {
+      type        = "Service"
+      identifiers = ["sqs.amazonaws.com"]
+    }
+
+    actions = [
+      "kms:GenerateDataKey",
+      "kms:Decrypt"
+    ]
+
+    resources = ["*"]
+  }
 }
 
 resource "aws_kms_key" "main" {
