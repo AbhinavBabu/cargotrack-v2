@@ -31,6 +31,12 @@ locals {
     ManagedBy = "Terraform"
   }
 
+  # Used in ASG dynamic tag blocks — ASG requires tag {} not tags = {}
+  asg_tags = {
+    Project   = var.project_name
+    ManagedBy = "Terraform"
+  }
+
   frontend_user_data = <<-EOF
 #!/bin/bash
 
@@ -446,16 +452,18 @@ resource "aws_autoscaling_group" "frontend" {
     version = "$Latest"
   }
 
-  tag {
-    key                 = "Project"
-    value               = var.project_name
-    propagate_at_launch = true
+  dynamic "tag" {
+    for_each = local.asg_tags
+
+    content {
+      key                 = tag.key
+      value               = tag.value
+      propagate_at_launch = true
+    }
   }
 
-  tag {
-    key                 = "ManagedBy"
-    value               = "Terraform"
-    propagate_at_launch = true
+  lifecycle {
+    ignore_changes = [desired_capacity]
   }
 
   timeouts {
@@ -487,16 +495,18 @@ resource "aws_autoscaling_group" "backend" {
     version = "$Latest"
   }
 
-  tag {
-    key                 = "Project"
-    value               = var.project_name
-    propagate_at_launch = true
+  dynamic "tag" {
+    for_each = local.asg_tags
+
+    content {
+      key                 = tag.key
+      value               = tag.value
+      propagate_at_launch = true
+    }
   }
 
-  tag {
-    key                 = "ManagedBy"
-    value               = "Terraform"
-    propagate_at_launch = true
+  lifecycle {
+    ignore_changes = [desired_capacity]
   }
 
   timeouts {

@@ -7,7 +7,7 @@ locals {
 
 resource "random_password" "db_password" {
 
-  length  = 20
+  length = 20
 
   special = true
 
@@ -141,7 +141,7 @@ resource "aws_db_instance" "database" {
 
   backup_retention_period = 7
 
-  deletion_protection = false
+  deletion_protection = true
 
   db_name = "cargotrack"
 
@@ -167,4 +167,8 @@ resource "aws_db_instance" "database" {
       Name = "${var.project_name}-database"
     }
   )
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
