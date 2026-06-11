@@ -1,4 +1,4 @@
-module "networking" {
+﻿module "networking" {
 
   source = "../../modules/networking"
 
@@ -121,4 +121,40 @@ module "endpoints" {
     module.networking.app_route_table_id,
     module.networking.db_route_table_id,
   ]
+}
+
+module "lambda_errors_alarm" {
+
+  source  = "terraform-aws-modules/cloudwatch/aws//modules/metric-alarm"
+  version = "~> 5.0"
+
+  alarm_name          = "${var.project_name}-lambda-errors"
+  alarm_description   = "Document processor Lambda errors — audit records may not be written to DynamoDB"
+  actions_enabled     = true
+
+  alarm_actions             = [module.monitoring.sns_topic_arn]
+  ok_actions                = [module.monitoring.sns_topic_arn]
+  insufficient_data_actions = []
+
+  namespace   = "AWS/Lambda"
+  metric_name = "Errors"
+  statistic   = "Sum"
+
+  dimensions = {
+    FunctionName = module.eventing.lambda_function_name
+  }
+
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 0
+  comparison_operator = "GreaterThanThreshold"
+
+  treat_missing_data = "notBreaching"
+
+  tags = {
+    Project     = var.project_name
+    ManagedBy   = "Terraform"
+    Environment = "prod"
+    Purpose     = "Document processing pipeline integrity"
+  }
 }

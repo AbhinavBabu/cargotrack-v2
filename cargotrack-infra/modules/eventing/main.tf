@@ -132,6 +132,19 @@ data "aws_iam_policy_document" "lambda_policy" {
       var.kms_key_arn
     ]
   }
+
+  statement {
+
+    sid = "DynamoDBWrite"
+
+    actions = [
+      "dynamodb:PutItem"
+    ]
+
+    resources = [
+      var.audit_table_arn
+    ]
+  }
 }
 
 resource "aws_iam_role_policy" "lambda" {
@@ -170,8 +183,9 @@ resource "aws_lambda_function" "document_processor" {
 
   environment {
     variables = {
-      PROJECT_NAME = var.project_name
-      AWS_REGION_NAME = var.aws_region
+      PROJECT_NAME     = var.project_name
+      AWS_REGION_NAME  = var.aws_region
+      AUDIT_TABLE_NAME = var.audit_table_name
     }
   }
 

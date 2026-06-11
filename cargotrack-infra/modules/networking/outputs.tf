@@ -43,3 +43,17 @@ output "db_subnet_ids" {
   ]
 }
 
+output "web_route_table_id" {
+  description = "Web-tier private route table ID"
+  value       = aws_route_table.web.id
+}
+
+output "app_route_table_id" {
+  description = "App-tier private route table ID"
+  value       = aws_route_table.app.id
+}
+
+output "db_route_table_id" {
+  description = "Database-tier private route table ID"
+  value       = aws_route_table.db.id
+}

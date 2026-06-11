@@ -1,4 +1,4 @@
-data "aws_caller_identity" "current" {}
+﻿data "aws_caller_identity" "current" {}
 
 data "aws_ami" "ubuntu" {
 
@@ -27,6 +27,11 @@ data "aws_ami" "ubuntu" {
 
 locals {
   common_tags = {
+    Project   = var.project_name
+    ManagedBy = "Terraform"
+  }
+
+  asg_tags = {
     Project   = var.project_name
     ManagedBy = "Terraform"
   }
@@ -247,7 +252,6 @@ resource "aws_iam_role" "ec2_role" {
   tags = local.common_tags
 }
 
-
 resource "aws_iam_role_policy_attachment" "ssm" {
 
   role = aws_iam_role.ec2_role.name
@@ -411,8 +415,6 @@ data "aws_iam_policy_document" "ec2_secrets" {
   }
 }
 
-
-
 resource "aws_iam_role_policy" "ec2_secrets" {
 
   name = "${var.project_name}-ec2-secrets-policy"
@@ -446,16 +448,18 @@ resource "aws_autoscaling_group" "frontend" {
     version = "$Latest"
   }
 
-  tag {
-    key                 = "Project"
-    value               = var.project_name
-    propagate_at_launch = true
+  dynamic "tag" {
+    for_each = local.asg_tags
+
+    content {
+      key                 = tag.key
+      value               = tag.value
+      propagate_at_launch = true
+    }
   }
 
-  tag {
-    key                 = "ManagedBy"
-    value               = "Terraform"
-    propagate_at_launch = true
+  lifecycle {
+    ignore_changes = [desired_capacity]
   }
 
   timeouts {
@@ -487,16 +491,18 @@ resource "aws_autoscaling_group" "backend" {
     version = "$Latest"
   }
 
-  tag {
-    key                 = "Project"
-    value               = var.project_name
-    propagate_at_launch = true
+  dynamic "tag" {
+    for_each = local.asg_tags
+
+    content {
+      key                 = tag.key
+      value               = tag.value
+      propagate_at_launch = true
+    }
   }
 
-  tag {
-    key                 = "ManagedBy"
-    value               = "Terraform"
-    propagate_at_launch = true
+  lifecycle {
+    ignore_changes = [desired_capacity]
   }
 
   timeouts {
@@ -529,5 +535,3 @@ resource "aws_lb_listener" "internal_http" {
     target_group_arn = aws_lb_target_group.backend.arn
   }
 }
-
-
