@@ -8,7 +8,7 @@ locals {
 resource "aws_s3_bucket" "documents" {
 
   bucket        = "${var.project_name}-documents"
-  force_destroy = false
+  force_destroy = true
 
   tags = merge(
     local.common_tags,
@@ -17,9 +17,6 @@ resource "aws_s3_bucket" "documents" {
     }
   )
 
-  lifecycle {
-    prevent_destroy = true
-  }
 }
 
 resource "aws_s3_bucket_versioning" "documents" {

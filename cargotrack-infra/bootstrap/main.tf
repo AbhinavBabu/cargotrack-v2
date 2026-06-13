@@ -1,4 +1,4 @@
-﻿locals {
+locals {
   tags = {
     Project   = var.project_name
     ManagedBy = "Terraform"
@@ -8,11 +8,8 @@
 
 resource "aws_s3_bucket" "state" {
 
-  bucket = "${var.project_name}-terraform-state"
-
-  lifecycle {
-    prevent_destroy = true
-  }
+  bucket        = "${var.project_name}-terraform-state"
+  force_destroy = true
 
   tags = merge(local.tags, { Name = "${var.project_name}-terraform-state" })
 }

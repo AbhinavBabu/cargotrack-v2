@@ -137,7 +137,7 @@ resource "aws_db_instance" "database" {
 
   backup_retention_period = 7
 
-  deletion_protection = true
+  deletion_protection = false
 
   db_name = "cargotrack"
 
@@ -164,7 +164,4 @@ resource "aws_db_instance" "database" {
     }
   )
 
-  lifecycle {
-    prevent_destroy = true
-  }
 }

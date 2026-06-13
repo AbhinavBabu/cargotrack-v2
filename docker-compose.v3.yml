@@ -1,0 +1,157 @@
+# CargoTrack v3 — Local Development Docker Compose
+#
+# Three-service architecture:
+#   core-service     — auth, shipments, admin, notifications (port 4000)
+#   document-service — uploads, downloads, S3 bridge (port 4001)
+#   ai-service       — compliance agent stub / future Bedrock (port 4002)
+#   postgres         — shared PostgreSQL (port 5432)
+#
+# Usage:
+#   docker compose -f docker-compose.v3.yml up --build
+#
+# Verify:
+#   curl http://localhost:4000/api/health   → core-service
+#   curl http://localhost:4001/api/health   → document-service
+#   curl http://localhost:4002/api/health   → ai-service
+#
+
+services:
+  # ── Shared Database ──────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:15-alpine
+    container_name: cargotrack-v3-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DATABASE_NAME:-cargotrack}
+      POSTGRES_USER: ${DATABASE_USER:-cargotrack}
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:-cargotrack123}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - pgdata_v3:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DATABASE_USER:-cargotrack}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Core Service (Auth + Shipments + Admin) ───────────────────────────────────
+  core-service:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: cargotrack-core
+    container_name: cargotrack-core
+    restart: unless-stopped
+    environment:
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_NAME: ${DATABASE_NAME:-cargotrack}
+      DATABASE_USER: ${DATABASE_USER:-cargotrack}
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD:-cargotrack123}
+      PORT: 4000
+      JWT_SECRET: ${JWT_SECRET:-cargotrack-secret-key-change-in-production}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-7d}
+      UPLOAD_DIR: /uploads
+      CORS_ORIGIN: ${CORS_ORIGIN:-*}
+      NODE_ENV: ${NODE_ENV:-development}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@cargotrack.com}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin123}
+      # EventBridge — leave blank locally to fall back to console logger
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-}
+      EVENT_BUS_NAME: ${EVENT_BUS_NAME:-}
+      # S3 — leave blank locally to use LocalStorageProvider
+      S3_BUCKET: ${S3_BUCKET:-}
+    ports:
+      - "${CORE_PORT:-4000}:4000"
+    volumes:
+      - uploads:/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ── Document Service ─────────────────────────────────────────────────────────
+  # Currently runs the same backend image but DOCUMENT_SERVICE_MODE=true
+  # causes index.ts to only mount document-related routes.
+  # In Phase 2, this becomes a fully separate codebase in services/document-service/.
+  document-service:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: cargotrack-docs
+    container_name: cargotrack-docs
+    restart: unless-stopped
+    environment:
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_NAME: ${DATABASE_NAME:-cargotrack}
+      DATABASE_USER: ${DATABASE_USER:-cargotrack}
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD:-cargotrack123}
+      PORT: 4001
+      JWT_SECRET: ${JWT_SECRET:-cargotrack-secret-key-change-in-production}
+      UPLOAD_DIR: /uploads
+      CORS_ORIGIN: ${CORS_ORIGIN:-*}
+      NODE_ENV: ${NODE_ENV:-development}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-}
+      S3_BUCKET: ${S3_BUCKET:-}
+      EVENT_BUS_NAME: ${EVENT_BUS_NAME:-}
+      # This env var signals Phase 1 mode — same binary, doc routes only
+      DOCUMENT_SERVICE_MODE: "true"
+    ports:
+      - "${DOCS_PORT:-4001}:4001"
+    volumes:
+      - uploads:/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ── AI Agent Service (stub) ───────────────────────────────────────────────────
+  # Phase 1: health check only, no Bedrock logic yet.
+  # Phase 2: full SQS consumer + Bedrock Converse API agent loop.
+  ai-service:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: cargotrack-ai
+    container_name: cargotrack-ai
+    restart: unless-stopped
+    environment:
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_NAME: ${DATABASE_NAME:-cargotrack}
+      DATABASE_USER: ${DATABASE_USER:-cargotrack}
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD:-cargotrack123}
+      PORT: 4002
+      NODE_ENV: ${NODE_ENV:-development}
+      AI_SERVICE_MODE: "true"
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-}
+      SQS_COMPLIANCE_QUEUE_URL: ${SQS_COMPLIANCE_QUEUE_URL:-}
+      BEDROCK_MODEL_ID: ${BEDROCK_MODEL_ID:-anthropic.claude-3-sonnet-20240229-v1:0}
+      S3_BUCKET: ${S3_BUCKET:-}
+    ports:
+      - "${AI_PORT:-4002}:4002"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ── Frontend ──────────────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/api}
+    image: cargotrack-frontend
+    container_name: cargotrack-web
+    restart: unless-stopped
+    environment:
+      # nginx proxies /api → core-service:4000
+      BACKEND_URL: ${BACKEND_URL:-http://core-service:4000}
+    ports:
+      - "${APP_PORT:-80}:80"
+    depends_on:
+      - core-service
+
+volumes:
+  pgdata_v3:
+  uploads:

@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
+import { PrismaClient, DocumentType } from '@prisma/client';
 import multer from 'multer';
 import { v4 as uuidv4 } from 'uuid';
 import path from 'path';
@@ -12,7 +12,8 @@ const router = Router();
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
-const ALLOWED_DOC_TYPES = ['INVOICE', 'SHIPPING_LABEL', 'PROOF_OF_DELIVERY', 'CUSTOMS'];
+// Use the Prisma enum values for validation — single source of truth.
+const ALLOWED_DOC_TYPES = Object.values(DocumentType);
 
 /**
  * @swagger
@@ -38,7 +39,7 @@ const ALLOWED_DOC_TYPES = ['INVOICE', 'SHIPPING_LABEL', 'PROOF_OF_DELIVERY', 'CU
  *                 format: binary
  *               documentType:
  *                 type: string
- *                 enum: [INVOICE, SHIPPING_LABEL, PROOF_OF_DELIVERY, CUSTOMS]
+ *                 enum: [INVOICE, BILL_OF_LADING, SHIPPING_MANIFEST, CUSTOMS, PROOF_OF_DELIVERY, SHIPPING_LABEL, OTHER]
  *     responses:
  *       201:
  *         description: Document uploaded
@@ -51,15 +52,25 @@ router.post('/shipment/:shipmentId', authenticate, upload.single('document'), as
     }
 
     const { documentType } = req.body;
-    if (!documentType || !ALLOWED_DOC_TYPES.includes(documentType)) {
-      res.status(400).json({ error: 'Invalid document type. Must be one of: ' + ALLOWED_DOC_TYPES.join(', ') });
+    if (!documentType || !ALLOWED_DOC_TYPES.includes(documentType as DocumentType)) {
+      res.status(400).json({
+        error: `Invalid document type. Must be one of: ${ALLOWED_DOC_TYPES.join(', ')}`,
+      });
       return;
     }
 
-    // Verify shipment belongs to user
-    const shipment = await prisma.shipment.findFirst({
-      where: { id: req.params.shipmentId, userId: req.user!.userId },
-    });
+    // FIXED: Admins can upload documents for any shipment.
+    // Regular users can only upload for their own shipments.
+    let shipment;
+    if (req.user!.role === 'ADMIN') {
+      shipment = await prisma.shipment.findUnique({
+        where: { id: req.params.shipmentId },
+      });
+    } else {
+      shipment = await prisma.shipment.findFirst({
+        where: { id: req.params.shipmentId, userId: req.user!.userId },
+      });
+    }
 
     if (!shipment) {
       res.status(404).json({ error: 'Shipment not found' });
@@ -76,11 +87,12 @@ router.post('/shipment/:shipmentId', authenticate, upload.single('document'), as
         originalName: req.file.originalname,
         fileType: req.file.mimetype,
         fileSize: req.file.size,
-        documentType,
+        documentType: documentType as DocumentType,
         shipmentId: req.params.shipmentId,
       },
     });
 
+    // Respond immediately; publish event asynchronously (fire-and-forget)
     res.status(201).json(doc);
 
     await publishDocumentUploaded({
@@ -116,9 +128,15 @@ router.post('/shipment/:shipmentId', authenticate, upload.single('document'), as
  */
 router.get('/shipment/:shipmentId', authenticate, async (req: Request, res: Response) => {
   try {
-    const shipment = await prisma.shipment.findFirst({
-      where: { id: req.params.shipmentId, userId: req.user!.userId },
-    });
+    // Admins can list documents for any shipment; users only for their own.
+    let shipment;
+    if (req.user!.role === 'ADMIN') {
+      shipment = await prisma.shipment.findUnique({ where: { id: req.params.shipmentId } });
+    } else {
+      shipment = await prisma.shipment.findFirst({
+        where: { id: req.params.shipmentId, userId: req.user!.userId },
+      });
+    }
 
     if (!shipment) {
       res.status(404).json({ error: 'Shipment not found' });
@@ -166,7 +184,7 @@ router.get('/:id/download', authenticate, async (req: Request, res: Response) =>
       return;
     }
 
-    // Allow access if user owns the shipment or is admin
+    // Allow access if user owns the shipment OR is admin
     if (doc.shipment.userId !== req.user!.userId && req.user!.role !== 'ADMIN') {
       res.status(403).json({ error: 'Access denied' });
       return;

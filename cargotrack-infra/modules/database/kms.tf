@@ -135,10 +135,6 @@ resource "aws_kms_key" "main" {
       Name = "${var.project_name}-cmk"
     }
   )
-
-  lifecycle {
-    prevent_destroy = true
-  }
 }
 
 resource "aws_kms_alias" "main" {
