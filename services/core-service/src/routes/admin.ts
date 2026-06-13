@@ -1,0 +1,363 @@
+import { Router, Request, Response } from 'express';
+import { PrismaClient, ShipmentStatus } from '@prisma/client';
+import { z } from 'zod';
+import { authenticate, requireAdmin } from '../middleware/auth';
+import { validate } from '../middleware/validate';
+import { notificationProvider } from '../providers/notification';
+import { eventPublisher } from '../providers/event';
+
+const prisma = new PrismaClient();
+const router = Router();
+
+const updateStatusSchema = z.object({
+  status: z.nativeEnum(ShipmentStatus),
+  location: z.string().optional(),
+  description: z.string().optional(),
+});
+
+// ─── GET /api/admin/stats ─────────────────────────────────────────────────────
+/**
+ * @swagger
+ * /api/admin/stats:
+ *   get:
+ *     summary: Platform-wide shipment statistics (admin)
+ *     tags: [Admin]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Aggregate counts by status
+ */
+router.get('/stats', authenticate, requireAdmin, async (_req: Request, res: Response) => {
+  try {
+    const [total, byStatus, totalDocuments, recentShipments] = await Promise.all([
+      prisma.shipment.count(),
+      // Count shipments grouped by status
+      prisma.shipment.groupBy({
+        by: ['status'],
+        _count: { id: true },
+      }),
+      prisma.shipmentDocument.count(),
+      // Last 7 days
+      prisma.shipment.count({
+        where: { createdAt: { gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) } },
+      }),
+    ]);
+
+    // Shape into a flat object for easy consumption
+    const statusCounts = Object.fromEntries(
+      Object.values(ShipmentStatus).map((s) => [s, 0])
+    );
+    for (const row of byStatus) {
+      statusCounts[row.status] = row._count.id;
+    }
+
+    res.json({
+      total,
+      totalDocuments,
+      recentShipments,
+      byStatus: statusCounts,
+    });
+  } catch (error) {
+    console.error('Admin stats error:', error);
+    res.status(500).json({ error: 'Failed to fetch stats' });
+  }
+});
+
+// ─── GET /api/admin/shipments ─────────────────────────────────────────────────
+/**
+ * @swagger
+ * /api/admin/shipments:
+ *   get:
+ *     summary: List all shipments (admin)
+ *     tags: [Admin]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, default: 1 }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 10 }
+ *       - in: query
+ *         name: status
+ *         schema: { type: string }
+ *       - in: query
+ *         name: search
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: List of all shipments
+ */
+router.get('/shipments', authenticate, requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = parseInt(req.query.limit as string) || 10;
+    const status = req.query.status as ShipmentStatus | undefined;
+    const search = req.query.search as string | undefined;
+    const skip = (page - 1) * limit;
+
+    const where: any = {};
+    if (status) where.status = status;
+    if (search) {
+      where.OR = [
+        { trackingNumber: { contains: search, mode: 'insensitive' } },
+        { title: { contains: search, mode: 'insensitive' } },
+        { senderName: { contains: search, mode: 'insensitive' } },
+        { receiverName: { contains: search, mode: 'insensitive' } },
+      ];
+    }
+
+    const [shipments, total] = await Promise.all([
+      prisma.shipment.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: { createdAt: 'desc' },
+        include: {
+          user: { select: { id: true, name: true, email: true } },
+          trackingEvents: { orderBy: { timestamp: 'desc' }, take: 1 },
+          // Include compliance status so admin table can show it
+          complianceReport: { select: { status: true } },
+          _count: { select: { documents: true } },
+        },
+      }),
+      prisma.shipment.count({ where }),
+    ]);
+
+    res.json({
+      data: shipments,
+      pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    });
+  } catch (error) {
+    console.error('Admin list shipments error:', error);
+    res.status(500).json({ error: 'Failed to fetch shipments' });
+  }
+});
+
+// ─── PUT /api/admin/shipments/:id/status ──────────────────────────────────────
+/**
+ * @swagger
+ * /api/admin/shipments/{id}/status:
+ *   put:
+ *     summary: Update shipment status (admin)
+ *     tags: [Admin]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [status]
+ *             properties:
+ *               status: { type: string }
+ *               location: { type: string }
+ *               description: { type: string }
+ *     responses:
+ *       200:
+ *         description: Status updated
+ */
+router.put('/shipments/:id/status', authenticate, requireAdmin, validate(updateStatusSchema), async (req: Request, res: Response) => {
+  try {
+    const { status, location, description } = req.body;
+
+    const shipment = await prisma.shipment.findUnique({ where: { id: req.params.id } });
+    if (!shipment) {
+      res.status(404).json({ error: 'Shipment not found' });
+      return;
+    }
+
+    const updated = await prisma.shipment.update({
+      where: { id: req.params.id },
+      data: { status },
+    });
+
+    await prisma.trackingEvent.create({
+      data: {
+        shipmentId: shipment.id,
+        status,
+        location: location || null,
+        description: description || `Shipment status updated to ${status}`,
+      },
+    });
+
+    // Notify shipment owner
+    await notificationProvider.send(
+      shipment.userId,
+      'Shipment Status Updated',
+      `Your shipment ${shipment.trackingNumber} status has been updated to ${status}.`
+    );
+
+    if (status === ShipmentStatus.DELIVERED) {
+      await notificationProvider.send(
+        shipment.userId,
+        'Shipment Delivered',
+        `Your shipment ${shipment.trackingNumber} has been delivered successfully!`
+      );
+    }
+
+    // FIXED: this now actually publishes to AWS EventBridge (not just console.log).
+    // When status is IN_TRANSIT, EventBridge will route this to the compliance-check
+    // SQS queue (Terraform rule configured in Phase 3).
+    await eventPublisher.publish('shipment.status_updated', {
+      shipmentId: shipment.id,
+      trackingNumber: shipment.trackingNumber,
+      oldStatus: shipment.status,
+      newStatus: status,
+    });
+
+    res.json(updated);
+  } catch (error) {
+    console.error('Admin update status error:', error);
+    res.status(500).json({ error: 'Failed to update status' });
+  }
+});
+
+// ─── GET /api/admin/documents ─────────────────────────────────────────────────
+// NEW: Platform-wide document listing for admin.
+// Allows admin to see all documents across all shipments — not just one shipment.
+/**
+ * @swagger
+ * /api/admin/documents:
+ *   get:
+ *     summary: List all documents across all shipments (admin)
+ *     tags: [Admin]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, default: 1 }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 20 }
+ *       - in: query
+ *         name: documentType
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Paginated list of all documents
+ */
+router.get('/documents', authenticate, requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = parseInt(req.query.limit as string) || 20;
+    const documentType = req.query.documentType as string | undefined;
+    const skip = (page - 1) * limit;
+
+    const where: any = {};
+    if (documentType) where.documentType = documentType;
+
+    const [documents, total] = await Promise.all([
+      prisma.shipmentDocument.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: { uploadedAt: 'desc' },
+        include: {
+          shipment: {
+            select: {
+              id: true,
+              trackingNumber: true,
+              title: true,
+              status: true,
+              user: { select: { name: true, email: true } },
+            },
+          },
+        },
+      }),
+      prisma.shipmentDocument.count({ where }),
+    ]);
+
+    res.json({
+      data: documents,
+      pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    });
+  } catch (error) {
+    console.error('Admin list all documents error:', error);
+    res.status(500).json({ error: 'Failed to fetch documents' });
+  }
+});
+
+// ─── GET /api/admin/documents/:shipmentId ─────────────────────────────────────
+/**
+ * @swagger
+ * /api/admin/documents/{shipmentId}:
+ *   get:
+ *     summary: View documents for a specific shipment (admin)
+ *     tags: [Admin]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: shipmentId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: List of documents for the shipment
+ */
+router.get('/documents/:shipmentId', authenticate, requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const documents = await prisma.shipmentDocument.findMany({
+      where: { shipmentId: req.params.shipmentId },
+      orderBy: { uploadedAt: 'desc' },
+    });
+
+    res.json(documents);
+  } catch (error) {
+    console.error('Admin view documents error:', error);
+    res.status(500).json({ error: 'Failed to fetch documents' });
+  }
+});
+
+// ─── GET /api/admin/compliance/:shipmentId ────────────────────────────────────
+// NEW: Returns the compliance report and all findings for a shipment.
+// AI service writes here; admin UI reads from here.
+/**
+ * @swagger
+ * /api/admin/compliance/{shipmentId}:
+ *   get:
+ *     summary: Get compliance report for a shipment (admin)
+ *     tags: [Admin]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: shipmentId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Compliance report with findings
+ */
+router.get('/compliance/:shipmentId', authenticate, requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const report = await prisma.complianceReport.findUnique({
+      where: { shipmentId: req.params.shipmentId },
+      include: {
+        findings: { orderBy: { severity: 'asc' } },
+      },
+    });
+
+    if (!report) {
+      res.status(404).json({ error: 'No compliance report found for this shipment' });
+      return;
+    }
+
+    res.json(report);
+  } catch (error) {
+    console.error('Admin compliance report error:', error);
+    res.status(500).json({ error: 'Failed to fetch compliance report' });
+  }
+});
+
+export default router;
